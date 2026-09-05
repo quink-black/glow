@@ -381,6 +381,11 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 		markdown = utils.WrapCodeBlock(markdown, filepath.Ext(m.currentDocument.Note))
 	}
 
+	var imgSrcs, imgAlts []string
+	if !isCode && m.common.cfg.ImagePreview {
+		markdown, imgSrcs, imgAlts = utils.InjectImageTokens(markdown)
+	}
+
 	out, err := r.Render(markdown)
 	if err != nil {
 		return "", fmt.Errorf("error rendering markdown: %w", err)
@@ -388,6 +393,14 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 
 	if isCode {
 		out = strings.TrimSpace(out)
+	}
+
+	if len(imgSrcs) > 0 {
+		out = utils.ReplaceImageTokens(out, imgSrcs, imgAlts, utils.ImageOptions{
+			BaseDir:   m.localDir(),
+			Width:     width,
+			ColorMode: utils.ChafaColorMode(),
+		})
 	}
 
 	// trim lines

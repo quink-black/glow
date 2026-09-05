@@ -211,6 +211,19 @@ func validateOptions(cmd *cobra.Command) error {
 	return nil
 }
 
+// imageBaseDir returns the base directory for resolving relative image
+// paths: the document's directory for local files, its URL directory for
+// remote documents, and "" (the working directory) for stdin.
+func imageBaseDir(srcURL, baseURL string) string {
+	if srcURL == "" {
+		return ""
+	}
+	if isURL(srcURL) {
+		return baseURL
+	}
+	return filepath.Dir(srcURL)
+}
+
 func stdinIsPipe() (bool, error) {
 	stat, err := os.Stdin.Stat()
 	if err != nil {
@@ -308,9 +321,22 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 		content = utils.WrapCodeBlock(string(b), ext)
 	}
 
+	var imgSrcs, imgAlts []string
+	if imagePreview && !isCode {
+		content, imgSrcs, imgAlts = utils.InjectImageTokens(content)
+	}
+
 	out, err := r.Render(content)
 	if err != nil {
 		return fmt.Errorf("unable to render markdown: %w", err)
+	}
+
+	if len(imgSrcs) > 0 {
+		out = utils.ReplaceImageTokens(out, imgSrcs, imgAlts, utils.ImageOptions{
+			BaseDir:   imageBaseDir(src.URL, baseURL),
+			Width:     int(width), //nolint:gosec
+			ColorMode: utils.ChafaColorMode(),
+		})
 	}
 
 	// display
