@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/colorprofile"
+	"golang.org/x/term"
 )
 
 // imageTokenPrefix marks the placeholder injected in place of markdown
@@ -143,15 +144,21 @@ func ReplaceImageTokens(rendered string, srcs, alts []string, opts ImageOptions)
 	return strings.Join(lines, "\n")
 }
 
-// ChafaColorMode returns the chafa -c value matching the terminal's color
-// profile. Glow's own rendering stack caps at 256 colors in every mode, so
-// art is capped the same way to keep the document visually consistent and
-// safe for downstream ANSI consumers that cannot parse 24-bit sequences
-// (such as vim's AnsiEsc).
+// ChafaColorMode returns the chafa -c value for the current terminal. A
+// truecolor terminal gets 24-bit art; anything piped (or without color
+// support) stays at 256 colors or fewer. The detected profile describes
+// the terminal glow was started from, not whatever reads the far end of
+// a pipe, so truecolor is used only when that terminal is the stdout
+// glow writes to.
 var ChafaColorMode = sync.OnceValue(func() string {
 	switch colorprofile.Detect(os.Stdout, os.Environ()) {
 	case colorprofile.NoTTY, colorprofile.Ascii:
 		return "none"
+	case colorprofile.TrueColor:
+		if term.IsTerminal(int(os.Stdout.Fd())) {
+			return "full"
+		}
+		return "256"
 	default:
 		return "256"
 	}
@@ -203,6 +210,9 @@ func renderChafa(src string, opts ImageOptions) (string, error) {
 		"-f", "symbols",
 		"--polite", "on",
 		"--animate", "off",
+		// Fill symbols add intra-cell gradient detail; measured ~2%
+		// closer to the source with both 256 and truecolor output.
+		"--fill", "block,half,quad,stipple",
 		"-c", opts.ColorMode,
 		"-s", size,
 		path,
