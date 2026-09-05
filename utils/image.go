@@ -38,6 +38,9 @@ type ImageOptions struct {
 	BaseDir string
 	// Width is the maximum art width in terminal columns.
 	Width int
+	// MaxRows is the maximum art height in terminal rows; zero means the
+	// image is only constrained by Width.
+	MaxRows int
 	// ColorMode is the chafa -c value: none, 16, 256, or full.
 	ColorMode string
 }
@@ -168,6 +171,7 @@ func chafaAvailable() bool {
 type artKey struct {
 	path      string
 	width     int
+	maxRows   int
 	colorMode string
 }
 
@@ -187,7 +191,10 @@ func renderChafa(src string, opts ImageOptions) (string, error) {
 	}
 	// chafa fits the image inside the given box, preserving aspect ratio.
 	size := strconv.Itoa(width) + "x"
-	key := artKey{path, width, opts.ColorMode}
+	if opts.MaxRows > 0 {
+		size += strconv.Itoa(opts.MaxRows)
+	}
+	key := artKey{path, width, opts.MaxRows, opts.ColorMode}
 	if v, ok := artCache.Load(key); ok {
 		return v.(string), nil
 	}

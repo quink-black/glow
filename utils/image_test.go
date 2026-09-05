@@ -162,6 +162,29 @@ func TestReplaceImageTokensIndentAndArt(t *testing.T) {
 	}
 }
 
+func TestReplaceImageTokensMaxRows(t *testing.T) {
+	img := filepath.Join("..", "example.png") // 1984x2548, tall
+	lookChafa = func(string) (string, error) { return "chafa", nil }
+	chafaOnce = sync.Once{}
+
+	_, srcs, alts := InjectImageTokens("![p](" + img + ")")
+
+	capped := strings.Split(ReplaceImageTokens(imageTokenPrefix+"0", srcs, alts,
+		ImageOptions{Width: 60, MaxRows: 20, ColorMode: "none"}), "\n")
+	if len(capped) > 20 {
+		t.Errorf("art height %d exceeds MaxRows 20", len(capped))
+	}
+	if len(capped) < 2 {
+		t.Errorf("expected art, got %q", capped)
+	}
+
+	uncapped := strings.Split(ReplaceImageTokens(imageTokenPrefix+"0", srcs, alts,
+		ImageOptions{Width: 60, MaxRows: 0, ColorMode: "none"}), "\n")
+	if len(uncapped) <= len(capped) {
+		t.Errorf("MaxRows 0 should not cap height: %d vs %d", len(uncapped), len(capped))
+	}
+}
+
 func TestFetchToCache(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GLOW_IMAGE_CACHE_DIR", dir)

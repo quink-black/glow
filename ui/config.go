@@ -11,6 +11,7 @@ type Config struct {
 	EnableMouse      bool
 	PreserveNewLines bool
 	ImagePreview     bool
+	ImageMaxRows     int
 
 	// Working directory or file path
 	Path string

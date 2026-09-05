@@ -399,6 +399,7 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 		out = utils.ReplaceImageTokens(out, imgSrcs, imgAlts, utils.ImageOptions{
 			BaseDir:   m.localDir(),
 			Width:     width,
+			MaxRows:   m.common.cfg.ImageMaxRows,
 			ColorMode: utils.ChafaColorMode(),
 		})
 	}

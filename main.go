@@ -27,6 +27,10 @@ import (
 	"golang.org/x/term"
 )
 
+// defaultImageMaxRows caps how many terminal rows an image may occupy, so
+// that a tall image cannot push the rest of the document out of view.
+const defaultImageMaxRows = 40
+
 var (
 	// Version as provided by goreleaser.
 	Version = ""
@@ -44,6 +48,7 @@ var (
 	preserveNewLines bool
 	mouse            bool
 	imagePreview     bool
+	imageMaxRows     int
 
 	rootCmd = &cobra.Command{
 		Use:   "glow [SOURCE|DIR]",
@@ -174,6 +179,7 @@ func validateOptions(cmd *cobra.Command) error {
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
 	imagePreview = viper.GetBool("imagePreview")
+	imageMaxRows = viper.GetInt("imageMaxRows")
 
 	if pager && tui {
 		return errors.New("cannot use both pager and tui")
@@ -335,6 +341,7 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 		out = utils.ReplaceImageTokens(out, imgSrcs, imgAlts, utils.ImageOptions{
 			BaseDir:   imageBaseDir(src.URL, baseURL),
 			Width:     int(width), //nolint:gosec
+			MaxRows:   imageMaxRows,
 			ColorMode: utils.ChafaColorMode(),
 		})
 	}
@@ -391,6 +398,7 @@ func runTUI(path string, content string) error {
 	cfg.EnableMouse = mouse
 	cfg.PreserveNewLines = preserveNewLines
 	cfg.ImagePreview = imagePreview
+	cfg.ImageMaxRows = imageMaxRows
 
 	// Run Bubble Tea program
 	if _, err := ui.NewProgram(cfg, content).Run(); err != nil {
@@ -437,6 +445,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
 	_ = rootCmd.Flags().MarkHidden("mouse")
 	rootCmd.Flags().BoolVar(&imagePreview, "image-preview", false, "render images as terminal art (requires chafa)")
+	rootCmd.Flags().IntVar(&imageMaxRows, "image-max-rows", 0, "maximum number of terminal rows an image may occupy (0 for no limit)")
 
 	// Config bindings
 	_ = viper.BindPFlag("pager", rootCmd.Flags().Lookup("pager"))
@@ -450,11 +459,14 @@ func init() {
 	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
 	_ = viper.BindPFlag("imagePreview", rootCmd.Flags().Lookup("image-preview"))
 	_ = viper.BindEnv("imagePreview", "GLOW_IMAGE_PREVIEW")
+	_ = viper.BindPFlag("imageMaxRows", rootCmd.Flags().Lookup("image-max-rows"))
+	_ = viper.BindEnv("imageMaxRows", "GLOW_IMAGE_MAX_ROWS")
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)
 	viper.SetDefault("all", true)
 	viper.SetDefault("imagePreview", true)
+	viper.SetDefault("imageMaxRows", defaultImageMaxRows)
 
 	rootCmd.AddCommand(configCmd, manCmd)
 }

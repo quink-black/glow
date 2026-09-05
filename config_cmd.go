@@ -25,6 +25,8 @@ width: 80
 all: false
 # render images as terminal art (requires chafa)
 imagePreview: true
+# maximum number of terminal rows an image may occupy (0 for no limit)
+imageMaxRows: 40
 `
 
 var configCmd = &cobra.Command{
