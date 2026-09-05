@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -186,6 +185,8 @@ func renderChafa(src string, opts ImageOptions) (string, error) {
 	if width <= 0 {
 		width = 80
 	}
+	// chafa fits the image inside the given box, preserving aspect ratio.
+	size := strconv.Itoa(width) + "x"
 	key := artKey{path, width, opts.ColorMode}
 	if v, ok := artCache.Load(key); ok {
 		return v.(string), nil
@@ -196,7 +197,7 @@ func renderChafa(src string, opts ImageOptions) (string, error) {
 		"--polite", "on",
 		"--animate", "off",
 		"-c", opts.ColorMode,
-		"-s", strconv.Itoa(width)+"x",
+		"-s", size,
 		path,
 	)
 	var stderr bytes.Buffer
@@ -250,20 +251,6 @@ func statImage(path string) (string, error) {
 	return path, nil
 }
 
-var contentTypes = map[string]string{
-	"image/png":       ".png",
-	"image/jpeg":      ".jpg",
-	"image/gif":       ".gif",
-	"image/webp":      ".webp",
-	"image/svg+xml":   ".svg",
-	"image/tiff":      ".tiff",
-	"image/x-icon":    ".ico",
-	"image/bmp":       ".bmp",
-	"image/avif":      ".avif",
-	"image/jxl":       ".jxl",
-	"application/pdf": ".pdf",
-}
-
 func imageCacheDir() string {
 	if d := os.Getenv("GLOW_IMAGE_CACHE_DIR"); d != "" {
 		return d
@@ -281,14 +268,11 @@ func fetchToCache(rawURL string) (string, error) {
 
 	sum := sha256.Sum256([]byte(rawURL))
 	name := hex.EncodeToString(sum[:])
+	// The extension is cosmetic: chafa sniffs the content, so an unknown
+	// type simply keeps the cache name extensionless.
 	ext := filepath.Ext(u.Path)
 	if len(ext) > 6 || strings.ContainsAny(ext, "?#") {
 		ext = ""
-	}
-	if ext == "" {
-		if ct, err := contentTypeOf(rawURL); err == nil {
-			ext = contentTypes[ct]
-		}
 	}
 	dst := filepath.Join(imageCacheDir(), name+ext)
 
@@ -306,11 +290,6 @@ func fetchToCache(rawURL string) (string, error) {
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("downloading %s: %s", rawURL, resp.Status)
-	}
-
-	if ext == "" {
-		ext = contentTypes[strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0])]
-		dst = filepath.Join(imageCacheDir(), name+ext)
 	}
 
 	f, err := os.CreateTemp(imageCacheDir(), ".dl-*")
@@ -332,16 +311,4 @@ func fetchToCache(rawURL string) (string, error) {
 		return "", err
 	}
 	return dst, nil
-}
-
-func contentTypeOf(rawURL string) (string, error) {
-	resp, err := http.Head(rawURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return "", errors.New(resp.Status)
-	}
-	return resp.Header.Get("Content-Type"), nil
 }
