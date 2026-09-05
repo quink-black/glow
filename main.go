@@ -43,6 +43,7 @@ var (
 	showLineNumbers  bool
 	preserveNewLines bool
 	mouse            bool
+	imagePreview     bool
 
 	rootCmd = &cobra.Command{
 		Use:   "glow [SOURCE|DIR]",
@@ -172,6 +173,7 @@ func validateOptions(cmd *cobra.Command) error {
 	showAllFiles = viper.GetBool("all")
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
+	imagePreview = viper.GetBool("imagePreview")
 
 	if pager && tui {
 		return errors.New("cannot use both pager and tui")
@@ -362,6 +364,7 @@ func runTUI(path string, content string) error {
 	cfg.GlamourMaxWidth = width
 	cfg.EnableMouse = mouse
 	cfg.PreserveNewLines = preserveNewLines
+	cfg.ImagePreview = imagePreview
 
 	// Run Bubble Tea program
 	if _, err := ui.NewProgram(cfg, content).Run(); err != nil {
@@ -407,6 +410,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&preserveNewLines, "preserve-new-lines", "n", false, "preserve newlines in the output")
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
 	_ = rootCmd.Flags().MarkHidden("mouse")
+	rootCmd.Flags().BoolVar(&imagePreview, "image-preview", false, "render images as terminal art (requires chafa)")
 
 	// Config bindings
 	_ = viper.BindPFlag("pager", rootCmd.Flags().Lookup("pager"))
@@ -418,10 +422,13 @@ func init() {
 	_ = viper.BindPFlag("preserveNewLines", rootCmd.Flags().Lookup("preserve-new-lines"))
 	_ = viper.BindPFlag("showLineNumbers", rootCmd.Flags().Lookup("line-numbers"))
 	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
+	_ = viper.BindPFlag("imagePreview", rootCmd.Flags().Lookup("image-preview"))
+	_ = viper.BindEnv("imagePreview", "GLOW_IMAGE_PREVIEW")
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)
 	viper.SetDefault("all", true)
+	viper.SetDefault("imagePreview", true)
 
 	rootCmd.AddCommand(configCmd, manCmd)
 }

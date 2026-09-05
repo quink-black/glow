@@ -23,6 +23,8 @@ pager: false
 width: 80
 # show all files, including hidden and ignored.
 all: false
+# render images as terminal art (requires chafa)
+imagePreview: true
 `
 
 var configCmd = &cobra.Command{
