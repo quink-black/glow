@@ -225,3 +225,52 @@ func TestFetchToCache(t *testing.T) {
 		t.Error("expected an error for a non-200 response")
 	}
 }
+
+func TestExpandSGRState(t *testing.T) {
+	tt := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "fully specified cells pass through",
+			in:   "\x1b[38;5;237;48;5;100mA\x1b[38;5;8;48;5;100mB\x1b[0m",
+			want: "\x1b[38;5;237;48;5;100mA\x1b[38;5;8;48;5;100mB\x1b[0m",
+		},
+		{
+			name: "fg-only update inherits carried background",
+			in:   "\x1b[38;5;237;48;5;100mA\x1b[38;5;8mB\x1b[0m",
+			want: "\x1b[38;5;237;48;5;100mA\x1b[38;5;8;48;5;100mB\x1b[0m",
+		},
+		{
+			name: "bg-only update inherits carried foreground",
+			in:   "\x1b[38;5;237;48;5;100mA\x1b[48;5;200mB\x1b[0m",
+			want: "\x1b[38;5;237;48;5;100mA\x1b[48;5;200;38;5;237mB\x1b[0m",
+		},
+		{
+			name: "empty parameter is an implied reset",
+			in:   "\x1b[38;5;1;48;5;2mA\x1b[m\x1b[38;5;9mB\x1b[0m",
+			want: "\x1b[38;5;1;48;5;2mA\x1b[m\x1b[38;5;9mB\x1b[0m",
+		},
+		{
+			name: "reset clears the carried state",
+			in:   "\x1b[38;5;237;48;5;100mA\x1b[0m\x1b[38;5;8mB\x1b[0m",
+			want: "\x1b[38;5;237;48;5;100mA\x1b[0m\x1b[38;5;8mB\x1b[0m",
+		},
+		{
+			name: "49 restores the default background, fg carries",
+			in:   "\x1b[38;5;237;48;5;100mA\x1b[49mB\x1b[0m",
+			want: "\x1b[38;5;237;48;5;100mA\x1b[49;38;5;237mB\x1b[0m",
+		},
+		{
+			name: "text without color escapes passes through",
+			in:   "plain text\x1b[1mbold\x1b[0m",
+			want: "plain text\x1b[1mbold\x1b[0m",
+		},
+	}
+	for _, tc := range tt {
+		if got := expandSGRState(tc.in); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

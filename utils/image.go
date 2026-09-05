@@ -80,8 +80,8 @@ func InjectImageTokens(md string) (string, []string, []string) {
 				break
 			}
 			start, end := pos+m[0], pos+m[1]
-			src := line[pos+m[4]:pos+m[5]]
-			alt := line[pos+m[2]:pos+m[3]]
+			src := line[pos+m[4] : pos+m[5]]
+			alt := line[pos+m[2] : pos+m[3]]
 
 			// Skip matches inside inline code spans and unsupported forms.
 			if strings.Count(line[:start], "`")%2 == 1 || src == "" ||
@@ -186,6 +186,84 @@ var artCache sync.Map
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
+// expandSGRState rewrites differential SGR updates in chafa art into
+// fully specified color escapes. Chafa relies on terminal state
+// persisting between escapes: a cell that changes only its foreground
+// sends "\e[38;5;Nm" and keeps the previous cell's background.
+// Stateless consumers (pagers, editors such as vim's AnsiEsc) render
+// each escape independently and lose the carried attribute, so every
+// color escape that omits an attribute gets the carried value
+// materialized. Resets (0, and the implied-parameter "\e[m") and
+// default restores (39, 49) clear the carried state and pass through
+// unchanged.
+//
+// Precondition: the input holds indexed color only. The caller gates on
+// ColorMode != "full" because truecolor triples are not parsed here,
+// and bare 16-color codes (chafa -c 16) are neither parsed nor
+// carried.
+func expandSGRState(s string) string {
+	fg, bg := "", ""
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		loc := sgrRe.FindStringSubmatchIndex(s[i:])
+		if loc == nil {
+			b.WriteString(s[i:])
+			break
+		}
+		start, end := i+loc[0], i+loc[1]
+		b.WriteString(s[i:start])
+		body := s[i+loc[2] : i+loc[3]]
+		codes := strings.Split(body, ";")
+		fgSeen, bgSeen := false, false
+		skip := 0
+		for _, c := range codes {
+			switch {
+			case skip == 38 && c == "5":
+				skip = 385
+			case skip == 385:
+				fg, fgSeen = c, true
+				skip = 0
+			case skip == 48 && c == "5":
+				skip = 485
+			case skip == 485:
+				bg, bgSeen = c, true
+				skip = 0
+			case skip != 0:
+				// truecolor triples are excluded by the caller's
+				// 256-color gate; anything else here is malformed
+				skip = 0
+			case c == "38":
+				skip = 38
+			case c == "48":
+				skip = 48
+			case c == "0" || c == "":
+				fg, bg = "", ""
+			case c == "39":
+				fg = ""
+			case c == "49":
+				bg = ""
+			}
+		}
+		rewrite := ""
+		if !fgSeen && fg != "" {
+			rewrite += ";38;5;" + fg
+		}
+		if !bgSeen && bg != "" {
+			rewrite += ";48;5;" + bg
+		}
+		if rewrite != "" {
+			b.WriteString("\x1b[" + body + rewrite + "m")
+		} else {
+			b.WriteString(s[start:end])
+		}
+		i = end
+	}
+	return b.String()
+}
+
+var sgrRe = regexp.MustCompile("\x1b\\[([0-9;]*)m")
+
 func renderChafa(src string, opts ImageOptions) (string, error) {
 	path, err := resolveImageSource(src, opts.BaseDir)
 	if err != nil {
@@ -227,6 +305,13 @@ func renderChafa(src string, opts ImageOptions) (string, error) {
 	art := strings.TrimSuffix(string(out), "\n")
 	if art == "" {
 		return "", fmt.Errorf("chafa produced no output for %s", src)
+	}
+	// Expansion is only needed for stateless consumers, which see the
+	// piped art capped at 256 colors by ChafaColorMode. A truecolor TTY
+	// renders the differential escapes itself, and expandSGRState does
+	// not parse truecolor triples.
+	if opts.ColorMode != "full" {
+		art = expandSGRState(art)
 	}
 	artCache.Store(key, art)
 	return art, nil
