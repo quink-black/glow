@@ -1,0 +1,347 @@
+package utils
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/charmbracelet/colorprofile"
+)
+
+// imageTokenPrefix marks the placeholder injected in place of markdown
+// images before glamour rendering. Tokens are alphanumeric only so glamour
+// cannot autolink, emphasize, or line-wrap them.
+const imageTokenPrefix = "GLOWIMGTOKEN"
+
+// imagePattern matches inline-form markdown images: ![alt](src "title").
+var imagePattern = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
+
+// fencePattern matches an opening or closing code fence.
+var fencePattern = regexp.MustCompile("^\\s*(`{3,}|~{3,})")
+
+// ImageOptions controls how image placeholders are turned into terminal art.
+type ImageOptions struct {
+	// BaseDir resolves relative image paths; empty means the working
+	// directory, or the document URL directory for remote documents.
+	BaseDir string
+	// Width is the maximum art width in terminal columns.
+	Width int
+	// ColorMode is the chafa -c value: none, 16, 256, or full.
+	ColorMode string
+}
+
+// InjectImageTokens replaces inline-form markdown images with unique
+// placeholder tokens on their own paragraph lines and returns the rewritten
+// document together with the image sources and alt texts in token order.
+// Images inside fenced code blocks or inline code spans are left untouched.
+func InjectImageTokens(md string) (string, []string, []string) {
+	lines := strings.Split(md, "\n")
+	inCode := false
+	fenceChar := byte(0)
+	fenceLen := 0
+	var srcs, alts []string
+
+	for i, line := range lines {
+		if f := fencePattern.FindStringSubmatch(line); f != nil {
+			if !inCode {
+				inCode = true
+				fenceChar = f[1][0]
+				fenceLen = len(f[1])
+			} else if f[1][0] == fenceChar && len(f[1]) >= fenceLen &&
+				strings.TrimSpace(line[strings.LastIndex(line, f[1])+len(f[1]):]) == "" {
+				inCode = false
+			}
+			continue
+		}
+		if inCode {
+			continue
+		}
+
+		pos := 0
+		for {
+			m := imagePattern.FindStringSubmatchIndex(line[pos:])
+			if m == nil {
+				break
+			}
+			start, end := pos+m[0], pos+m[1]
+			src := line[pos+m[4]:pos+m[5]]
+			alt := line[pos+m[2]:pos+m[3]]
+
+			// Skip matches inside inline code spans and unsupported forms.
+			if strings.Count(line[:start], "`")%2 == 1 || src == "" ||
+				strings.HasPrefix(src, "data:") {
+				pos = end
+				continue
+			}
+
+			token := imageTokenPrefix + strconv.Itoa(len(srcs))
+			srcs = append(srcs, src)
+			alts = append(alts, alt)
+			line = line[:start] + "\n\n" + token + "\n\n" + line[end:]
+			pos = start + len(token) + 4
+		}
+		lines[i] = line
+	}
+
+	return strings.Join(lines, "\n"), srcs, alts
+}
+
+// ReplaceImageTokens post-processes glamour output: every line containing an
+// image token is replaced by the chafa character art for that image,
+// prefixed with the line's leading indentation. When chafa is unavailable
+// the output is returned unchanged; when a single image fails, its line
+// falls back to the alt text.
+func ReplaceImageTokens(rendered string, srcs, alts []string, opts ImageOptions) string {
+	if len(srcs) == 0 || !chafaAvailable() {
+		return rendered
+	}
+	tokenRe := regexp.MustCompile(imageTokenPrefix + `(\d+)`)
+
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		m := tokenRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		idx, err := strconv.Atoi(m[1])
+		if err != nil || idx < 0 || idx >= len(srcs) {
+			continue
+		}
+
+		indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		art, err := renderChafa(srcs[idx], opts)
+		if err != nil {
+			fallback := srcs[idx]
+			if idx < len(alts) && alts[idx] != "" {
+				fallback = alts[idx]
+			}
+			lines[i] = indent + fallback
+			continue
+		}
+
+		artLines := strings.Split(art, "\n")
+		for j := range artLines {
+			artLines[j] = indent + artLines[j]
+		}
+		lines[i] = strings.Join(artLines, "\n")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ChafaColorMode returns the chafa -c value matching the terminal's color
+// profile. Glow's own rendering stack caps at 256 colors in every mode, so
+// art is capped the same way to keep the document visually consistent and
+// safe for downstream ANSI consumers that cannot parse 24-bit sequences
+// (such as vim's AnsiEsc).
+var ChafaColorMode = sync.OnceValue(func() string {
+	switch colorprofile.Detect(os.Stdout, os.Environ()) {
+	case colorprofile.NoTTY, colorprofile.Ascii:
+		return "none"
+	default:
+		return "256"
+	}
+})
+
+var (
+	chafaBin  string
+	chafaOnce sync.Once
+	lookChafa = exec.LookPath
+)
+
+func chafaAvailable() bool {
+	chafaOnce.Do(func() { chafaBin, _ = lookChafa("chafa") })
+	return chafaBin != ""
+}
+
+type artKey struct {
+	path      string
+	width     int
+	colorMode string
+}
+
+var artCache sync.Map
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+func renderChafa(src string, opts ImageOptions) (string, error) {
+	path, err := resolveImageSource(src, opts.BaseDir)
+	if err != nil {
+		return "", err
+	}
+
+	width := opts.Width
+	if width <= 0 {
+		width = 80
+	}
+	key := artKey{path, width, opts.ColorMode}
+	if v, ok := artCache.Load(key); ok {
+		return v.(string), nil
+	}
+
+	cmd := exec.Command(chafaBin,
+		"-f", "symbols",
+		"--polite", "on",
+		"--animate", "off",
+		"-c", opts.ColorMode,
+		"-s", strconv.Itoa(width)+"x",
+		path,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("chafa failed for %s: %w: %s", src, err, strings.TrimSpace(stderr.String()))
+	}
+
+	art := strings.TrimSuffix(string(out), "\n")
+	if art == "" {
+		return "", fmt.Errorf("chafa produced no output for %s", src)
+	}
+	artCache.Store(key, art)
+	return art, nil
+}
+
+func resolveImageSource(src, baseDir string) (string, error) {
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return fetchToCache(src)
+	}
+	if strings.HasPrefix(baseDir, "http://") || strings.HasPrefix(baseDir, "https://") {
+		if u, err := url.Parse(baseDir); err == nil {
+			if r, err := u.Parse(src); err == nil {
+				return fetchToCache(r.String())
+			}
+		}
+		return "", fmt.Errorf("cannot resolve image %q against %q", src, baseDir)
+	}
+	if filepath.IsAbs(src) {
+		return statImage(src)
+	}
+	dir := baseDir
+	if dir == "" {
+		var err error
+		if dir, err = os.Getwd(); err != nil {
+			return "", err
+		}
+	}
+	return statImage(filepath.Join(dir, src))
+}
+
+func statImage(path string) (string, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("%s is a directory", path)
+	}
+	return path, nil
+}
+
+var contentTypes = map[string]string{
+	"image/png":       ".png",
+	"image/jpeg":      ".jpg",
+	"image/gif":       ".gif",
+	"image/webp":      ".webp",
+	"image/svg+xml":   ".svg",
+	"image/tiff":      ".tiff",
+	"image/x-icon":    ".ico",
+	"image/bmp":       ".bmp",
+	"image/avif":      ".avif",
+	"image/jxl":       ".jxl",
+	"application/pdf": ".pdf",
+}
+
+func imageCacheDir() string {
+	if d := os.Getenv("GLOW_IMAGE_CACHE_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(os.TempDir(), "glow-image-cache")
+}
+
+// fetchToCache downloads a remote image into the cache directory and returns
+// the local path. Cached files are keyed by the URL hash and reused.
+func fetchToCache(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256([]byte(rawURL))
+	name := hex.EncodeToString(sum[:])
+	ext := filepath.Ext(u.Path)
+	if len(ext) > 6 || strings.ContainsAny(ext, "?#") {
+		ext = ""
+	}
+	if ext == "" {
+		if ct, err := contentTypeOf(rawURL); err == nil {
+			ext = contentTypes[ct]
+		}
+	}
+	dst := filepath.Join(imageCacheDir(), name+ext)
+
+	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
+		return dst, nil
+	}
+	if err := os.MkdirAll(imageCacheDir(), 0o755); err != nil {
+		return "", err
+	}
+
+	resp, err := httpClient.Get(rawURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("downloading %s: %s", rawURL, resp.Status)
+	}
+
+	if ext == "" {
+		ext = contentTypes[strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0])]
+		dst = filepath.Join(imageCacheDir(), name+ext)
+	}
+
+	f, err := os.CreateTemp(imageCacheDir(), ".dl-*")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()      //nolint:errcheck
+		os.Remove(tmp) //nolint:errcheck
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return "", err
+	}
+	return dst, nil
+}
+
+func contentTypeOf(rawURL string) (string, error) {
+	resp, err := http.Head(rawURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New(resp.Status)
+	}
+	return resp.Header.Get("Content-Type"), nil
+}

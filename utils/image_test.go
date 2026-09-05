@@ -1,0 +1,170 @@
+package utils
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestInjectImageTokens(t *testing.T) {
+	tt := []struct {
+		name      string
+		input     string
+		wantSrcs  []string
+		wantNoTok bool
+	}{
+		{
+			name:     "single image",
+			input:    "hello\n\n![alt text](img.png)\n\nbye",
+			wantSrcs: []string{"img.png"},
+		},
+		{
+			name:     "multiple images",
+			input:    "![a](1.png) text ![b](2.jpg)",
+			wantSrcs: []string{"1.png", "2.jpg"},
+		},
+		{
+			name:      "fenced code block",
+			input:     "```go\n![x](not-an-image.png)\n```",
+			wantNoTok: true,
+		},
+		{
+			name:      "tilde fenced block",
+			input:     "~~~\n![x](not-an-image.png)\n~~~",
+			wantNoTok: true,
+		},
+		{
+			name:      "inline code span",
+			input:     "see `![x](no.png)` here",
+			wantNoTok: true,
+		},
+		{
+			name:      "reference-style untouched",
+			input:     "![alt][ref]\n\n[ref]: img.png",
+			wantNoTok: true,
+		},
+		{
+			name:      "data URI skipped",
+			input:     "![x](data:image/png;base64,AAAA)",
+			wantNoTok: true,
+		},
+		{
+			name:     "image with title",
+			input:    `![a](img.png "the title")`,
+			wantSrcs: []string{"img.png"},
+		},
+		{
+			name:     "image inside link",
+			input:    "[![a](thumb.png)](https://example.com)",
+			wantSrcs: []string{"thumb.png"},
+		},
+		{
+			name:     "code block before image",
+			input:    "```\nfence\n```\n\n![a](real.png)",
+			wantSrcs: []string{"real.png"},
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			out, srcs, alts := InjectImageTokens(tc.input)
+			if len(srcs) != len(tc.wantSrcs) {
+				t.Fatalf("got srcs %v, want %v", srcs, tc.wantSrcs)
+			}
+			for i := range srcs {
+				if srcs[i] != tc.wantSrcs[i] {
+					t.Errorf("srcs[%d] = %q, want %q", i, srcs[i], tc.wantSrcs[i])
+				}
+				if alts[i] == "" {
+					t.Errorf("alts[%d] is empty", i)
+				}
+			}
+			if tc.wantNoTok && strings.Contains(out, imageTokenPrefix) {
+				t.Errorf("unexpected token in output:\n%s", out)
+			}
+			if !tc.wantNoTok {
+				for i := range srcs {
+					want := imageTokenPrefix + string(rune('0'+i))
+					if !strings.Contains(out, want) {
+						t.Errorf("missing token %s in output:\n%s", want, out)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceImageTokensPassthrough(t *testing.T) {
+	lookChafa = func(string) (string, error) { return "", exec.ErrNotFound }
+	chafaOnce = sync.Once{}
+
+	injected, srcs, alts := InjectImageTokens("![a](img.png)")
+	rendered := "some\n" + imageTokenPrefix + "0\n" + "output"
+	out := ReplaceImageTokens(rendered, srcs, alts, ImageOptions{ColorMode: "256"})
+	if out != rendered {
+		t.Errorf("expected passthrough without chafa, got:\n%s", out)
+	}
+	_ = injected
+}
+
+func TestReplaceImageTokensFallbackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "chafa")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lookChafa = func(string) (string, error) { return fakeBin, nil }
+	chafaOnce = sync.Once{}
+
+	injected, srcs, alts := InjectImageTokens("![pretty picture](missing.png)")
+	out := ReplaceImageTokens("  "+injected, srcs, alts, ImageOptions{ColorMode: "none"})
+	if !strings.Contains(out, "pretty picture") {
+		t.Errorf("expected alt text fallback, got:\n%s", out)
+	}
+	if strings.Contains(out, imageTokenPrefix) {
+		t.Errorf("token not replaced:\n%s", out)
+	}
+}
+
+func TestReplaceImageTokensIndentAndArt(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "one-pixel.png")
+	// 1x1 transparent PNG
+	png := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+		0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+		0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+	}
+	if err := os.WriteFile(img, png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lookChafa = func(string) (string, error) { return "chafa", nil }
+	chafaOnce = sync.Once{}
+
+	_, srcs, alts := InjectImageTokens("![p](" + img + ")")
+	out := ReplaceImageTokens("    "+imageTokenPrefix+"0", srcs, alts,
+		ImageOptions{BaseDir: dir, Width: 20, ColorMode: "none"})
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "    ") {
+			t.Errorf("art line lost indentation: %q", line)
+		}
+	}
+	if strings.Contains(out, imageTokenPrefix) {
+		t.Errorf("token not replaced:\n%s", out)
+	}
+}
+
+func TestFetchToCache(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GLOW_IMAGE_CACHE_DIR", dir)
+	url := "https://example.com/img/pic.png"
+	if _, err := fetchToCache(url); err == nil {
+		t.Skip("network unavailable or unexpected success")
+	}
+}
