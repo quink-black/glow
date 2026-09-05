@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,8 +165,40 @@ func TestReplaceImageTokensIndentAndArt(t *testing.T) {
 func TestFetchToCache(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GLOW_IMAGE_CACHE_DIR", dir)
-	url := "https://example.com/img/pic.png"
-	if _, err := fetchToCache(url); err == nil {
-		t.Skip("network unavailable or unexpected success")
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path == "/missing.png" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("image-bytes"))
+	}))
+	defer srv.Close()
+
+	got, err := fetchToCache(srv.URL + "/img/pic.png")
+	if err != nil {
+		t.Fatalf("fetchToCache: %v", err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("cached file unreadable: %v", err)
+	}
+	if string(data) != "image-bytes" {
+		t.Errorf("cached content = %q, want %q", data, "image-bytes")
+	}
+
+	// A second fetch must be served from the cache, not the network.
+	again, err := fetchToCache(srv.URL + "/img/pic.png")
+	if err != nil {
+		t.Fatalf("second fetchToCache: %v", err)
+	}
+	if again != got || hits != 1 {
+		t.Errorf("expected cache reuse: path %q vs %q, hits %d", again, got, hits)
+	}
+
+	if _, err := fetchToCache(srv.URL + "/missing.png"); err == nil {
+		t.Error("expected an error for a non-200 response")
 	}
 }
